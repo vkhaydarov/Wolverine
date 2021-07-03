@@ -3,10 +3,11 @@ import base64
 import cv2
 import numpy as np
 import logging
-import time
-from os import path
+from time import time, sleep
+from os import path, makedirs
 import json
 import threading
+
 
 class DataLogger:
     def __init__(self, cfg):
@@ -28,12 +29,12 @@ class DataLogger:
 
     def stop(self):
         self._stop = True
-        time.sleep(self.cfg['storage']['interval'] / 1000.0)
+        sleep(self.cfg['storage']['interval'] / 1000.0)
 
     def _get_and_save_loop(self):
 
         # Set initial time point
-        cycle_begin = time.time() - self.cfg['storage']['interval'] / 1000.0
+        cycle_begin = time() - self.cfg['storage']['interval'] / 1000.0
 
         while not self._stop:
 
@@ -43,62 +44,84 @@ class DataLogger:
             cycle_begin = cycle_begin + self.cfg['storage']['interval'] / 1000.0
 
             # If last cycle lasted much longer, we need to skip the current polling cycle to catch up in the future
-            if cycle_begin + 0.010 < time.time():
-                logging.error('Capturing skipped (increase time interval)')
+            if cycle_begin + 0.010 < time():
+                logging.error('Capturing skipped (consider increasing interval)')
                 continue
 
-            frame_data = self._get_data_from_api()
-            if frame_data is None:
-                continue
+            begin_time = time()
+            frame_received, frame_data = self._get_data_from_api()
+            read_time = int((time() - begin_time)*1000)
 
-            filename = self._get_filename()
-            frame_saved = self._save_frame(frame_data, filename)
-            if not frame_saved:
-                continue
+            if frame_received:
+                filename = self._get_filename()
 
-            metadata_saved = self._save_metadata(frame_data, filename)
-            if not metadata_saved:
-                self._remove_last_saved_frame()
-                continue
+                begin_time = time()
+                frame = convert_str_to_frame(frame_data['frame']['frame'])
+                conversion_time = int((time() - begin_time) * 1000)
 
-            self._current_frame_id += 1
+                begin_time = time()
+                frame_saved = self._save_frame(frame, filename)
+                frame_save_time = int((time() - begin_time) * 1000)
 
-            if self._stop:
-                break
+                if frame_saved:
+                    begin_time = time()
+                    metadata_saved = self._save_metadata(frame_data, filename)
+                    if not metadata_saved:
+                        self._remove_last_saved_frame()
+                    else:
+                        self._current_frame_id += 1
+                    metadata_save_time = int((time() - begin_time) * 1000)
+                else:
+                    frame_save_time = 0
+                    metadata_save_time = 0
+            else:
+                conversion_time = 0
+                frame_save_time = 0
+                metadata_save_time = 0
+
+            total_time = int((time() - cycle_begin) * 1000)
+            debug_str = 'Total execution time of receiving and saving frame %i ms (data receiving %i, conversion %i, image saving %i, metadata saving %i)' \
+                        % (total_time, read_time, conversion_time, frame_save_time, metadata_save_time)
+            logging.debug(debug_str)
 
             # Calculate real cycle duration
-            cycle_dur = time.time() - cycle_begin
+            cycle_dur = time() - cycle_begin
 
             # If the cycle duration longer than given and no connection issues, jump directly to the next cycle
             if cycle_dur > self.cfg['storage']['interval'] / 1000.0:
                 logging.warning('Capturing takes longer ' + str(cycle_dur) + ' than given time intervals')
             else:
                 # Calculate how long we need to wait till the begin of the next cycle
-                time.sleep(max(self.cfg['storage']['interval'] / 1000.0 - (time.time() - cycle_begin), 0))
+                sleep(max(self.cfg['storage']['interval'] / 1000.0 - (time() - cycle_begin), 0))
 
     def _get_data_from_api(self):
-        api_endpoint = self.cfg['api']['endpoint'] + '/get_frame'
+        api_endpoint = self.cfg['api']['endpoint'] + 'get_frame'
         try:
-            response = requests.get(api_endpoint)
+            resp = requests.get(api_endpoint)
         except requests.exceptions.ConnectionError:
             logging.error('Cannot establish connection to ' + self.cfg['api']['endpoint'])
-            return None
+            return False, None
 
-        resp_data = response.json()
-
-        if resp_data['status']['code'] == 500:
-            logging.warning('No frame retrieved. API returned message: ' + resp_data['status']['message'])
-            return None
+        try:
+            resp_data = resp.json()
+        except Exception:
+            logging.warning('Cannot deserialise received json %s' % resp_data)
+            return False, None
 
         if resp_data['status']['code'] == 200:
             logging.info('Frame received')
-
-        return resp_data
+            return True, resp_data
+        else:
+            logging.warning('No frame retrieved. Error %s API returned message %s'
+                            % (resp_data['status']['code'], resp_data['status']['message']))
+            return False, None
 
     def _get_filename(self):
-        return self.cfg['storage']['filename_mask'] + '%0*d' % (6, self._current_frame_id)
+        filename = self.cfg['storage']['filename_mask'] + '%0*d' % (6, self._current_frame_id)
+        return filename
 
-    def _save_frame(self, frame_data, filename):
+    def _save_frame(self, frame, filename):
+
         filepath = ''
 
         try:
@@ -106,10 +129,17 @@ class DataLogger:
             filename += '.png'
             fullname = path.join(filepath, filename)
         except:
-            logging.error('Cannot create saving path:' + filepath + ' ' + filename)
+            logging.error('Cannot concatenate saving path:' + filepath + ' ' + filename)
             return False
 
-        frame = convert_str_to_frame(frame_data['frame']['frame'])
+        if not path.isdir(filepath):
+            logging.info('Saving directory %s does not exist' % filepath)
+            try:
+                makedirs(filepath)
+                logging.info('Directory %s created' % filepath)
+            except Exception:
+                logging.info('Directory %s cannot be created, consider granting necessary rights' % filepath)
+                return False
 
         try:
             ret = cv2.imwrite(fullname, frame)
@@ -123,6 +153,7 @@ class DataLogger:
         pass
 
     def _save_metadata(self, frame_data, filename):
+        begin_time = time()
         filepath = ''
 
         try:
@@ -130,18 +161,27 @@ class DataLogger:
             filename += '.json'
             fullname = path.join(filepath, filename)
         except:
-            logging.error('Cannot create saving path:' + filepath + ' ' + filename)
+            logging.error('Cannot concatenate saving path:' + filepath + ' ' + filename)
             return False
+
+        if not path.isdir(filepath):
+            logging.info('Saving directory %s does not exist' % filepath)
+            try:
+                makedirs(filepath)
+                logging.info('Directory %s created' % filepath)
+            except Exception:
+                logging.info('Directory %s cannot be created, consider granting necessary rights' % filepath)
+                return False
 
         try:
             with open(fullname, 'w') as outfile:
-                data_to_save = {'metadata': frame_data['metadata'], 'timestamp':frame_data['timestamp']}
+                data_to_save = {'metadata': frame_data['metadata'], 'timestamp': frame_data['timestamp']}
                 json.dump(data_to_save, outfile, skipkeys=True, indent=4)
                 logging.info('Metadata saved as ' + fullname)
         except:
             logging.error('Saving metadata as ' + fullname + ' failed')
             return False
-
+        logging.debug('Execution time of metadata file writing ' + str(int((time() - begin_time) * 1000)) + ' ms')
         return True
 
     def _create_folder(self):
@@ -150,8 +190,9 @@ class DataLogger:
 
 def convert_str_to_frame(frame_str):
     # https://jdhao.github.io/2020/03/17/base64_opencv_pil_image_conversion/
-
+    begin_time = time()
     frame_bytes = base64.b64decode(frame_str)
     frame_arr = np.frombuffer(frame_bytes, dtype=np.uint8)  # im_arr is one-dim Numpy array
     frame = cv2.imdecode(frame_arr, flags=cv2.IMREAD_COLOR)
+    logging.debug('Execution time of string to frame conversion ' + str(int((time() - begin_time) * 1000)) + ' ms')
     return frame
