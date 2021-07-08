@@ -53,11 +53,11 @@ class DataLogger:
             read_time = int((time() - begin_time)*1000)
 
             if frame_received:
-                filename = self._get_filename()
-
                 begin_time = time()
                 frame = convert_str_to_frame(frame_data['frame']['frame'])
                 conversion_time = int((time() - begin_time) * 1000)
+
+                filename = self._get_filename(frame_data['timestamp'])
 
                 begin_time = time()
                 frame_saved = self._save_frame(frame, filename)
@@ -116,9 +116,11 @@ class DataLogger:
                             % (resp_data['status']['code'], resp_data['status']['message']))
             return False, None
 
-    def _get_filename(self):
-        filename = self.cfg['storage']['filename_mask'] + '%0*d' % (6, self._current_frame_id)
-        return filename
+    def _get_filename(self, timestamp):
+        if self.cfg['storage']['filename_mask'] == 'timestamp':
+            return str(timestamp)
+        else:
+            return self.cfg['storage']['filename_mask'] + '%0*d' % (6, self._current_frame_id)
 
     def _save_frame(self, frame, filename):
 
@@ -175,7 +177,9 @@ class DataLogger:
 
         try:
             with open(fullname, 'w') as outfile:
-                data_to_save = {'metadata': frame_data['metadata'], 'timestamp': frame_data['timestamp']}
+                data_to_save = {'metadata': frame_data['metadata'],
+                                'labels': frame_data['labels'],
+                                'timestamp': frame_data['timestamp']}
                 json.dump(data_to_save, outfile, skipkeys=True, indent=4)
                 logging.info('Metadata saved as ' + fullname)
         except:
