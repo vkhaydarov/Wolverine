@@ -10,33 +10,50 @@ import threading
 
 
 class DataLogger:
-    def __init__(self, cfg):
+    def __init__(self, cfg: dict):
+        """
+        This class represents a data logger that requests images from PlantEye-Vision REST API endpoint and
+        stores them locally.
+        :param cfg:dict: Set of parameters of the data logger.
+        """
         self.cfg = cfg
 
-        self._initialised = False
-        self._get_and_save_thread = None
+        self.__initialised = False
+        self.__get_and_save_thread = None
 
         # Stop and exit flags
-        self._exit = False
-        self._stop = False
+        self.__exit = False
+        self.__stop = False
 
-        self._current_frame_id = 0
+        self.__current_frame_id = 0
 
     def start(self):
-        self._stop = False
-        self._get_and_save_thread = threading.Thread(target=self._get_and_save_loop, args=[])
-        self._get_and_save_thread.start()
+        """
+        Runs instance of the data logger.
+        :return:
+        """
+        self.__stop = False
+        self.__get_and_save_thread = threading.Thread(target=self.__get_and_save_loop, args=[])
+        self.__get_and_save_thread.start()
 
     def stop(self):
-        self._stop = True
+        """
+        Stops instance of the data logger.
+        :return:
+        """
+        self.__stop = True
         sleep(self.cfg['storage']['interval'] / 1000.0)
 
-    def _get_and_save_loop(self):
+    def __get_and_save_loop(self):
+        """
+        Method that requests, receives, formats and saves data.
+        :return:
+        """
 
         # Set initial time point
         cycle_begin = time() - self.cfg['storage']['interval'] / 1000.0
 
-        while not self._stop:
+        while not self.__stop:
 
             logging.info('Loop step')
 
@@ -49,27 +66,27 @@ class DataLogger:
                 continue
 
             begin_time = time()
-            frame_received, frame_data = self._get_data_from_api()
+            frame_data = self.__get_data_from_api()
             read_time = int((time() - begin_time)*1000)
 
-            if frame_received:
+            if frame_data is not None:
                 begin_time = time()
                 frame = convert_str_to_frame(frame_data['frame']['frame'])
                 conversion_time = int((time() - begin_time) * 1000)
 
-                filename = self._get_filename(frame_data['timestamp'])
+                filename = self.__get_filename(frame_data['timestamp'])
 
                 begin_time = time()
-                frame_saved = self._save_frame(frame, filename)
+                frame_saved = self.__save_frame(frame, filename)
                 frame_save_time = int((time() - begin_time) * 1000)
 
                 if frame_saved:
                     begin_time = time()
-                    metadata_saved = self._save_metadata(frame_data, filename)
+                    metadata_saved = self.__save_metadata(frame_data, filename)
                     if not metadata_saved:
-                        self._remove_last_saved_frame()
+                        self.__remove_last_saved_frame()
                     else:
-                        self._current_frame_id += 1
+                        self.__current_frame_id += 1
                     metadata_save_time = int((time() - begin_time) * 1000)
                 else:
                     frame_save_time = 0
@@ -94,35 +111,50 @@ class DataLogger:
                 # Calculate how long we need to wait till the begin of the next cycle
                 sleep(max(self.cfg['storage']['interval'] / 1000.0 - (time() - cycle_begin), 0))
 
-    def _get_data_from_api(self):
+    def __get_data_from_api(self):
+        """
+        Method to get request data from an instance of PlantEye/Vision over REST API
+        :return: Response of the PlantEye/Vision endpoint; None - if no data returned or the endpoint unavailable
+        """
         api_endpoint = self.cfg['api']['endpoint'] + 'get_frame'
         try:
             resp = requests.get(api_endpoint)
         except requests.exceptions.ConnectionError:
             logging.error('Cannot establish connection to ' + self.cfg['api']['endpoint'])
-            return False, None
+            return None
 
         try:
             resp_data = resp.json()
         except Exception:
-            logging.warning('Cannot deserialise received json %s' % resp_data)
-            return False, None
+            logging.warning('Cannot deserialise received json %s' % resp)
+            return None
 
         if resp_data['status']['code'] == 200:
             logging.info('Frame received')
-            return True, resp_data
+            return resp_data
         else:
             logging.warning('No frame retrieved. Error %s API returned message %s'
                             % (resp_data['status']['code'], resp_data['status']['message']))
-            return False, None
+            return None
 
-    def _get_filename(self, timestamp):
+    def __get_filename(self, timestamp: int) -> str:
+        """
+        Generates a filename out of the timestamp value or out of the frame id if the filename mask specified.
+        :param timestamp: int: Timestamp
+        :return: str: Filename
+        """
         if self.cfg['storage']['filename_mask'] == 'timestamp':
             return str(timestamp)
         else:
-            return self.cfg['storage']['filename_mask'] + '%0*d' % (6, self._current_frame_id)
+            return self.cfg['storage']['filename_mask'] + '%0*d' % (6, self.__current_frame_id)
 
-    def _save_frame(self, frame, filename):
+    def __save_frame(self, frame, filename: str) -> bool:
+        """
+        Saves frame onto disk.
+        :param frame:
+        :param filename: str: Filename
+        :return: bool: Status: True - if file is saved successfully; False - otherwise
+        """
 
         filepath = ''
 
@@ -151,10 +183,16 @@ class DataLogger:
             logging.error('Saving as ' + fullname + ' failed')
             return False
 
-    def _remove_last_saved_frame(self):
+    def __remove_last_saved_frame(self):
         pass
 
-    def _save_metadata(self, frame_data, filename):
+    def __save_metadata(self, frame_data: dict, filename: str) -> bool:
+        """
+        Saves metadata in a json file
+        :param frame_data: dict: Dictonary with metadata to the image file.
+        :param filename: str: Filename for the metadata file.
+        :return: bool: Status: True - if file is saved successfully; False - otherwise
+        """
         begin_time = time()
         filepath = ''
 
@@ -187,9 +225,6 @@ class DataLogger:
             return False
         logging.debug('Execution time of metadata file writing ' + str(int((time() - begin_time) * 1000)) + ' ms')
         return True
-
-    def _create_folder(self):
-        pass
 
 
 def convert_str_to_frame(frame_str):

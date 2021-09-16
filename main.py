@@ -9,10 +9,6 @@ if __name__ == '__main__':
     # Import and validate config
     with open('config.yaml') as config_file:
         cfg = safe_load(config_file)
-    # validation_res, validation_msg = validate_cfg(cfg, 'src/config_schema.json')
 
-    # if not validation_res:
-    #    print(validation_msg)
-    #   exit(1)
     data_logger = DataLogger(cfg)
     data_logger.start()
